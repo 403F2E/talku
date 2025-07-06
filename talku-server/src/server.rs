@@ -1,7 +1,11 @@
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+use std::{
+    collections::HashSet,
+    io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
+    sync::{Arc, Mutex},
 };
+
+type ClientSet = Arc<Mutex<HashSet<TcpStream>>>;
 
 #[allow(unused)]
 #[derive(Debug)]
@@ -9,66 +13,101 @@ pub struct Server {
     pub name: String,
     pub password: String,
     pub listener: TcpListener,
-    pub clients: Vec<TcpStream>,
-    pub payload: String,
+    pub clients: ClientSet,
 }
 
 #[allow(unused)]
 impl Server {
-    pub async fn new(name: String, users: Vec<u16>) -> Self {
+    pub fn new(name: String) -> Self {
         Self {
             name,
             password: "admin".to_string(),
-            listener: TcpListener::bind("127.0.0.1:8808").await.unwrap(),
-            clients: Vec::new(),
-            payload: "Hello message".into(),
+            listener: TcpListener::bind("127.0.0.1:8808").unwrap(),
+            clients: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
-    pub async fn broadcast(&mut self, message: &[u8]) {
-        println!("now I arrived to the broadcast function.");
-        for client in self.clients.iter_mut() {
-            if let Err(e) = client.write_all(message).await {
+    pub fn broadcast(&mut self, message: &[u8]) {
+        let mut clients = self.clients.lock().unwrap();
+        for i in 0..clients.len() {
+            println!("broadcasting to all users...");
+            if let Err(e) = clients[i].write_all(message) {
                 eprintln!("failed to write to the socket : err = {:?}", e);
             }
+            client.flush().map_err(|_| ());
         }
-        println!("after I v finished to the broadcast function.");
     }
 
     pub fn who(&self) {
-        for client in self.clients.iter() {
+        for client in self.clients.lock().iter() {
             println!("{:?}", client);
         }
     }
 
-    pub async fn receive_messages(&mut self) {
-        println!("I v arrived to the receive_messages function");
+    fn handle_client(mut stream: TcpStream, clients: ClientSet) {
+        let peer_addr = stream.peer_addr().unwrap();
+        println!("New connection from: {}", peer_addr);
 
-        let mut buf = [0; 1024];
-
-        if self.clients.len() == 0 {
-            println!("the list of clients is empty");
-            return;
+        {
+            let mut clients = *clients.lock().unwrap();
+            clients.insert(stream.try_clone().unwrap());
         }
 
-        for i in 0..self.clients.len() {
-            match self.clients[i].read(&mut buf).await {
-                Ok(0) => {
-                    println!("Client disconnected.");
-                    self.clients.swap_remove(i);
+        let reader = BufReader::new(stream.try_clone().unwrap());
+        for line in reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(_) => break,
+            };
+
+            println!("Received from {}: {}", peer_addr, line);
+
+            let mut clients = clients.lock().unwrap();
+            let mut disconnected = Vec::new();
+
+            for client in clients.iter() {
+                let mut client = client.try_clone().unwrap();
+                if client.peer_addr().unwrap() != peer_addr {
+                    if let Err(e) = writeln!(client, "{}: {}", peer_addr, line) {
+                        println!("Error writing to client: {}", e);
+                        disconnected.push(client.try_clone().unwrap());
+                    }
                 }
-                Ok(n) => {
-                    println!("Received {} bytes", n);
-                    self.broadcast(&n.to_ne_bytes()).await;
-                }
-                Err(e) => {
-                    eprintln!("Failed to read from socket: {:?}", e);
-                    self.clients.clear();
-                }
-                _ => continue,
+            }
+
+            for dc in disconnected {
+                clients.remove(&dc);
             }
         }
 
-        println!("I v finished to the receive_messages function");
+        {
+            let mut clients = clients.lock().unwrap();
+            clients.remove(&stream);
+        }
+
+        println!("Client disconnected: {}", peer_addr);
+    }
+
+    fn main() -> std::io::Result<()> {
+        let listener = TcpListener::bind("0.0.0.0:12345")?;
+        println!("Server listening on port 12345...");
+
+        let clients: ClientSet = Arc::new(Mutex::new(HashSet::new()));
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let clients = Arc::clone(&clients);
+                    thread::spawn(move || {
+                        handle_client(stream, clients);
+                    });
+                }
+                Err(e) => {
+                    println!("Connection failed: {}", e);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
