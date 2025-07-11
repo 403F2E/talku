@@ -1,53 +1,73 @@
-use std::{
-    io::{Read, Write},
-    net::TcpStream,
-};
+use std::io::{self, BufRead, Write};
+use std::net::TcpStream;
+use std::thread;
 
 #[allow(unused)]
-#[derive(Debug)]
-pub struct Client {
-    pub id: u16,
-    pub username: String,
-    pub password: String,
-    pub stream: TcpStream,
+pub struct ChatClient {
+    username: String,
+    password: String,
+    stream: TcpStream,
 }
 
-#[allow(unused)]
-impl Client {
-    pub fn new(username: String, password: String) -> Self {
-        let mut stream = TcpStream::connect("127.0.0.1:8808").unwrap();
-        Self {
-            id: 1,
+impl ChatClient {
+    pub fn connect(address: &str, username: String, password: String) -> std::io::Result<Self> {
+        let stream = TcpStream::connect(address)?;
+        Ok(ChatClient {
+            stream,
             username,
             password,
-            stream,
+        })
+    }
+
+    pub fn run(&mut self) {
+        println!("Connected to server. Type your messages below (Ctrl+C to exit):");
+
+        let mut receive_stream = self.stream.try_clone().unwrap();
+        let username = self.username.clone();
+        thread::spawn(move || {
+            Self::receive_messages(&mut receive_stream, username);
+        });
+
+        self.send_messages();
+    }
+
+    fn receive_messages(stream: &mut TcpStream, username: String) {
+        let mut reader = io::BufReader::new(stream);
+        let mut buffer = String::new();
+
+        loop {
+            buffer.clear();
+            match reader.read_line(&mut buffer) {
+                Ok(0) => {
+                    println!("\nDisconnected from server");
+                    std::process::exit(0);
+                }
+                Ok(_) => {
+                    print!("\r{}\n", buffer.trim());
+                    print!("{} : ", username);
+                    io::stdout().flush().unwrap();
+                }
+                Err(e) => {
+                    println!("\nError receiving message: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
     }
 
-    pub fn send_message(&mut self, message: &str) {
-        if let Err(e) = self.stream.write_all(message.as_bytes()) {
-            eprintln!("failed to write to the socket : err = {:?}", e);
-        }
-        self.stream.flush().map_err(|_| ());
-    }
+    fn send_messages(&mut self) {
+        let mut input = String::new();
+        loop {
+            print!("{} : ", self.username.as_str());
+            io::stdout().flush().unwrap();
+            input.clear();
+            io::stdin().read_line(&mut input).unwrap();
+            let message: String = format!("{} : {}", self.username, input);
 
-    pub fn receive_message(&mut self) {
-        println!("I here to receive");
-        let mut buf = [0; 1024];
-        match self.stream.read(&mut buf) {
-            Ok(0) => {
-                println!("The connection with the server got closed!!");
+            if let Err(e) = self.stream.write_all(message.as_bytes()) {
+                println!("Error sending message: {}", e);
+                break;
             }
-            Ok(n) => {
-                let received = String::from_utf8_lossy(&buf[..n]);
-                println!("received...\n{}", received);
-            }
-            Err(e) => {
-                eprintln!("failed to read from socket; err = {:?}", e);
-            }
-            _ => {
-                println!("no message was sent");
-            }
-        };
+        }
     }
 }

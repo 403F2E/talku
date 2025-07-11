@@ -1,18 +1,13 @@
 mod server;
-mod simple_user_input;
+mod user_input;
 
-use crate::server::Server;
-use crate::simple_user_input::user_input::input;
-use std::{
-    sync::{Arc, Mutex},
-    thread,
-};
+use server::ChatServer;
+use user_input::input;
 
-fn authentification() -> Result<(String, String), ()> {
-    let username = input("Enter your username : ");
+fn authentication() -> Result<(String, String), ()> {
+    let name = input("Enter your username : ");
     let mut password: String;
-    let account_type: String;
-    if username == "server".to_string() {
+    if name == "server".to_string() {
         let mut tentatives = 3;
         loop {
             password = input("Enter your password : ");
@@ -28,39 +23,18 @@ fn authentification() -> Result<(String, String), ()> {
                 continue;
             }
         }
-        account_type = "Server".to_string();
     } else {
         return Err(());
     }
-    Ok((account_type, username))
+    Ok((name, password))
 }
 
 fn main() {
-    // console_subscriber::init();
-
-    match authentification() {
-        Ok((_, username)) => {
-            println!("Server starting at || IP:localhost port:8808");
-            println!("Server is listening...");
-
-            let server = Arc::new(Mutex::new(Server::new(username)));
-
-            let server_recv = server.clone();
-
-            for stream in server_recv.lock().unwrap().listener.incoming() {
-                let server_handle = server.clone();
-                match stream {
-                    Ok(stream) => {
-                        thread::spawn(move || {
-                            server_handle.lock().unwrap().receive_messages(stream);
-                        });
-                    }
-                    Err(e) => {
-                        println!("Connection failed: {}", e);
-                    }
-                }
-            }
+    match authentication() {
+        Ok((name, password)) => {
+            let mut server = ChatServer::new("127.0.0.1:8088", name, password).unwrap();
+            server.run();
         }
-        _ => panic!("There is some kind of error!"),
+        Err(e) => println!("An erro has occured : {:?}", e),
     }
 }

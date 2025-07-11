@@ -1,113 +1,112 @@
-use std::{
-    collections::HashSet,
-    io::{BufRead, BufReader, Write},
-    net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex},
-};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-type ClientSet = Arc<Mutex<HashSet<TcpStream>>>;
+struct Client {
+    id: usize,
+    stream: TcpStream,
+}
 
-#[allow(unused)]
-#[derive(Debug)]
-pub struct Server {
-    pub name: String,
-    pub password: String,
-    pub listener: TcpListener,
-    pub clients: ClientSet,
+impl Client {
+    fn new(id: usize, stream: TcpStream) -> Self {
+        Client { id, stream }
+    }
 }
 
 #[allow(unused)]
-impl Server {
-    pub fn new(name: String) -> Self {
-        Self {
+pub struct ChatServer {
+    name: String,
+    password: String,
+    listener: TcpListener,
+    clients: Arc<Mutex<HashMap<usize, TcpStream>>>,
+    next_id: usize,
+}
+
+impl ChatServer {
+    pub fn new(address: &str, name: String, password: String) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(address)?;
+        Ok(ChatServer {
             name,
-            password: "admin".to_string(),
-            listener: TcpListener::bind("127.0.0.1:8808").unwrap(),
-            clients: Arc::new(Mutex::new(HashSet::new())),
-        }
+            password,
+            listener,
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            next_id: 0,
+        })
     }
 
-    pub fn broadcast(&mut self, message: &[u8]) {
-        let mut clients = self.clients.lock().unwrap();
-        for i in 0..clients.len() {
-            println!("broadcasting to all users...");
-            if let Err(e) = clients[i].write_all(message) {
-                eprintln!("failed to write to the socket : err = {:?}", e);
-            }
-            client.flush().map_err(|_| ());
-        }
-    }
+    pub fn run(&mut self) {
+        println!(
+            "Server {} started on {:?}. Waiting for connections...",
+            self.name,
+            self.listener.local_addr().unwrap()
+        );
 
-    pub fn who(&self) {
-        for client in self.clients.lock().iter() {
-            println!("{:?}", client);
-        }
-    }
-
-    fn handle_client(mut stream: TcpStream, clients: ClientSet) {
-        let peer_addr = stream.peer_addr().unwrap();
-        println!("New connection from: {}", peer_addr);
-
-        {
-            let mut clients = *clients.lock().unwrap();
-            clients.insert(stream.try_clone().unwrap());
-        }
-
-        let reader = BufReader::new(stream.try_clone().unwrap());
-        for line in reader.lines() {
-            let line = match line {
-                Ok(line) => line,
-                Err(_) => break,
-            };
-
-            println!("Received from {}: {}", peer_addr, line);
-
-            let mut clients = clients.lock().unwrap();
-            let mut disconnected = Vec::new();
-
-            for client in clients.iter() {
-                let mut client = client.try_clone().unwrap();
-                if client.peer_addr().unwrap() != peer_addr {
-                    if let Err(e) = writeln!(client, "{}: {}", peer_addr, line) {
-                        println!("Error writing to client: {}", e);
-                        disconnected.push(client.try_clone().unwrap());
-                    }
-                }
-            }
-
-            for dc in disconnected {
-                clients.remove(&dc);
-            }
-        }
-
-        {
-            let mut clients = clients.lock().unwrap();
-            clients.remove(&stream);
-        }
-
-        println!("Client disconnected: {}", peer_addr);
-    }
-
-    fn main() -> std::io::Result<()> {
-        let listener = TcpListener::bind("0.0.0.0:12345")?;
-        println!("Server listening on port 12345...");
-
-        let clients: ClientSet = Arc::new(Mutex::new(HashSet::new()));
-
-        for stream in listener.incoming() {
+        for stream in self.listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    let clients = Arc::clone(&clients);
-                    thread::spawn(move || {
-                        handle_client(stream, clients);
-                    });
+                    self.next_id += 1;
+                    self.handle_new_connection(stream);
                 }
                 Err(e) => {
                     println!("Connection failed: {}", e);
                 }
             }
         }
+    }
 
-        Ok(())
+    fn handle_new_connection(&self, stream: TcpStream) {
+        let client = Client::new(self.next_id, stream.try_clone().unwrap());
+        let clients = Arc::clone(&self.clients);
+
+        clients
+            .lock()
+            .unwrap()
+            .insert(client.id, client.stream.try_clone().unwrap());
+
+        thread::spawn(move || {
+            Self::handle_client(client, clients);
+        });
+    }
+
+    fn handle_client(client: Client, clients: Arc<Mutex<HashMap<usize, TcpStream>>>) {
+        let addr = client.stream.peer_addr().unwrap();
+        println!("New connection from {}", addr);
+        Self::broadcast_message(&clients, "A new client has joined!!\n", client.id);
+
+        let mut reader = BufReader::new(client.stream.try_clone().unwrap());
+
+        loop {
+            let mut message = String::new();
+            match reader.read_line(&mut message) {
+                Ok(0) => break,
+                Ok(_) => {
+                    print!("Received from {}: {}", addr, message);
+                    Self::broadcast_message(&clients, &message, client.id);
+                }
+                Err(e) => {
+                    println!("Error reading from {}: {}", addr, e);
+                    break;
+                }
+            }
+        }
+
+        println!("Connection closed with {}", addr);
+        clients.lock().unwrap().remove(&client.id);
+    }
+
+    fn broadcast_message(
+        clients: &Arc<Mutex<HashMap<usize, TcpStream>>>,
+        message: &str,
+        sender_id: usize,
+    ) {
+        let clients = clients.lock().unwrap();
+        for (client_id, client_stream) in clients.iter() {
+            if *client_id != sender_id {
+                let mut stream = client_stream.try_clone().unwrap();
+                stream.write_all(message.as_bytes()).unwrap();
+            }
+        }
     }
 }
